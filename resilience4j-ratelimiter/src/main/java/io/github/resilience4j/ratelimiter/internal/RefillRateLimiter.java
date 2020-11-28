@@ -250,9 +250,7 @@ public class RefillRateLimiter implements RateLimiter {
      * @return
      */
     private long calculateBatches(long nanosPerPermission, long nanosSinceLastUpdate) {
-        if(nanosPerPermission==0) {
-            return Long.MAX_VALUE;
-        } else if(nanosSinceLastUpdate<0l) {
+        if(nanosSinceLastUpdate<=0l) {
             return 0l;
         }
 
