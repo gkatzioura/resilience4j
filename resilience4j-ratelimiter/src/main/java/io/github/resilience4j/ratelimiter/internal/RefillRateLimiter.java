@@ -69,7 +69,7 @@ public class RefillRateLimiter implements RateLimiter {
 
         this.waitingThreads = new AtomicInteger(0);
         this.state = new AtomicReference<>(new State(
-            rateLimiterConfig, calculateNanosPerPermission(rateLimiterConfig),  rateLimiterConfig.getInitialPermits(), 0, currentNanoTime()
+            rateLimiterConfig, calculateNanosPerPermission(rateLimiterConfig),  rateLimiterConfig.getInitialPermits(), 0, nanoTime()
         ));
 
         /**
@@ -240,7 +240,7 @@ public class RefillRateLimiter implements RateLimiter {
     }
 
     private long nanosSinceLastUpdate(State activeState) {
-        return currentNanoTime() - activeState.updatedAt;
+        return nanoTime() - activeState.updatedAt;
     }
 
     /**
@@ -253,7 +253,6 @@ public class RefillRateLimiter implements RateLimiter {
         if(nanosSinceLastUpdate<=0l) {
             return 0l;
         }
-
         return nanosSinceLastUpdate / nanosPerPermission;
     }
 
@@ -297,7 +296,7 @@ public class RefillRateLimiter implements RateLimiter {
             permissionsWithReservation -= permits;
         }
 
-        return new State(state.config, state.nanosPerPermission, permissionsWithReservation, nanosToWait, currentNanoTime());
+        return new State(state.config, state.nanosPerPermission, permissionsWithReservation, nanosToWait, nanoTime());
     }
 
 

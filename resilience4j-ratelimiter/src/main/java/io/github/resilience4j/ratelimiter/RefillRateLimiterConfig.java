@@ -20,6 +20,7 @@ package io.github.resilience4j.ratelimiter;
 
 import io.github.resilience4j.ratelimiter.internal.RefillRateLimiter;
 
+import java.io.Serializable;
 import java.time.Duration;
 
 /**
@@ -28,7 +29,9 @@ import java.time.Duration;
  * Therefore {@link RefillRateLimiterConfig#nanosPerPermission} is used which is a product of the division
  * of {@link RateLimiterConfig#limitRefreshPeriod} to {@link RateLimiterConfig#limitForPeriod}.
  */
-public class RefillRateLimiterConfig extends RateLimiterConfig {
+public class RefillRateLimiterConfig extends RateLimiterConfig implements Serializable {
+
+    private static final long serialVersionUID = 3095810082683985263L;
 
     private static final boolean DEFAULT_WRITABLE_STACK_TRACE_ENABLED = true;
 
