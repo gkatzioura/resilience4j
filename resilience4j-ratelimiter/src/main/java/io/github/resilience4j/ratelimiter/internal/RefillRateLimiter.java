@@ -48,15 +48,9 @@ import static java.util.concurrent.locks.LockSupport.parkNanos;
  * <p>All {@link RefillRateLimiter} updates are atomic and state is encapsulated in {@link
  * AtomicReference} to {@link RefillRateLimiter.State}
  */
-public class RefillRateLimiter implements RateLimiter {
+public class RefillRateLimiter extends BaseAtomicLimiter<RefillRateLimiterConfig, RefillRateLimiter.State> implements RateLimiter {
 
     private static final long nanoTimeStart = nanoTime();
-
-    private final String name;
-    private final AtomicInteger waitingThreads;
-    private final AtomicReference<State> state;
-    private final Map<String, String> tags;
-    private final RateLimiterEventProcessor eventProcessor;
 
     public RefillRateLimiter(String name, RefillRateLimiterConfig rateLimiterConfig) {
         this(name, rateLimiterConfig, HashMap.empty());
@@ -64,18 +58,9 @@ public class RefillRateLimiter implements RateLimiter {
 
     public RefillRateLimiter(String name, RefillRateLimiterConfig rateLimiterConfig,
                              Map<String, String> tags) {
-        this.name = name;
-        this.tags = tags;
-
-        this.waitingThreads = new AtomicInteger(0);
-        this.state = new AtomicReference<>(new State(
-            rateLimiterConfig, calculateNanosPerPermission(rateLimiterConfig),  rateLimiterConfig.getInitialPermits(), 0, nanoTime()
-        ));
-
-        /**
-         * Calculate this one before hand
-         */
-        eventProcessor = new RateLimiterEventProcessor();
+        super(name, new AtomicReference<>(new State(
+            rateLimiterConfig, rateLimiterConfig.getInitialPermits(), 0, nanoTime() - nanoTimeStart
+        )),tags);
     }
 
     /**
@@ -93,45 +78,10 @@ public class RefillRateLimiter implements RateLimiter {
      * {@inheritDoc}
      */
     @Override
-    public void changeTimeoutDuration(final Duration timeoutDuration) {
-        RefillRateLimiterConfig newConfig = RefillRateLimiterConfig.from(state.get().config)
-            .timeoutDuration(timeoutDuration)
-            .build();
-        state.updateAndGet(currentState -> new State(
-            newConfig, currentState.nanosPerPermission, currentState.activePermissions,
-            currentState.nanosToWait, currentState.updatedAt
-        ));
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public void changeLimitForPeriod(final int limitForPeriod) {
-        RefillRateLimiterConfig newConfig = RefillRateLimiterConfig.from(state.get().config)
-            .limitForPeriod(limitForPeriod)
-            .build();
-        state.updateAndGet(currentState -> new State(
-            newConfig, calculateNanosPerPermission(newConfig), currentState.activePermissions,
-            currentState.nanosToWait, currentState.updatedAt
-        ));
-    }
-
-    /**
-     * Calculates time elapsed from the class loading.
-     */
-    private long currentNanoTime() {
-        return nanoTime() - nanoTimeStart;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    @Override
     public boolean acquirePermission(int permits) {
-        long timeoutInNanos = state.get().config.getTimeoutDuration().toNanos();
+        long timeoutInNanos = state().get().getConfig().getTimeoutDuration().toNanos();
         State modifiedState = updateStateWithBackOff(permits, timeoutInNanos);
-        boolean result = waitForPermissionIfNecessary(timeoutInNanos, modifiedState.nanosToWait);
+        boolean result = waitForPermissionIfNecessary(timeoutInNanos, modifiedState.getNanosToWait());
         publishRateLimiterEvent(result, permits);
         return result;
     }
@@ -141,19 +91,19 @@ public class RefillRateLimiter implements RateLimiter {
      */
     @Override
     public long reservePermission(final int permits) {
-        long timeoutInNanos = state.get().config.getTimeoutDuration().toNanos();
+        long timeoutInNanos = state().get().getConfig().getTimeoutDuration().toNanos();
         State modifiedState = updateStateWithBackOff(permits, timeoutInNanos);
 
-        boolean canAcquireImmediately = modifiedState.nanosToWait <= 0;
+        boolean canAcquireImmediately = modifiedState.getNanosToWait()<= 0;
         if (canAcquireImmediately) {
             publishRateLimiterEvent(true, permits);
             return 0;
         }
 
-        boolean canAcquireInTime = timeoutInNanos >= modifiedState.nanosToWait;
+        boolean canAcquireInTime = timeoutInNanos >= modifiedState.getNanosToWait();
         if (canAcquireInTime) {
             publishRateLimiterEvent(true, permits);
-            return modifiedState.nanosToWait;
+            return modifiedState.getNanosToWait();
         }
 
         publishRateLimiterEvent(false, permits);
@@ -172,11 +122,11 @@ public class RefillRateLimiter implements RateLimiter {
      * @param timeoutInNanos a side-effect-free function
      * @return the updated value
      */
-    private State updateStateWithBackOff(final int permits, final long timeoutInNanos) {
+    protected State updateStateWithBackOff(final int permits, final long timeoutInNanos) {
         State prev;
         State next;
         do {
-            prev = state.get();
+            prev = state().get();
             next = calculateNextState(permits, timeoutInNanos, prev);
         } while (!compareAndSet(prev, next));
         return next;
@@ -196,8 +146,8 @@ public class RefillRateLimiter implements RateLimiter {
      * @return {@code true} if successful. False return indicates that the actual value was not
      * equal to the expected value.
      */
-    private boolean compareAndSet(final State current, final State next) {
-        if (state.compareAndSet(current, next)) {
+    protected boolean compareAndSet(final State current, final State next) {
+        if (state().compareAndSet(current, next)) {
             return true;
         }
         parkNanos(1); // back-off
@@ -215,13 +165,13 @@ public class RefillRateLimiter implements RateLimiter {
      * @param activeState    current state of {@link RefillRateLimiter}
      * @return next {@link State}
      */
-    private State calculateNextState(final int permits, final long timeoutInNanos,
+    protected State calculateNextState(final int permits, final long timeoutInNanos,
                                      final State activeState) {
         long nanosSinceLastUpdate = nanosSinceLastUpdate(activeState);
         int nexPermissions = calculateNextPermissions(activeState, nanosSinceLastUpdate);
 
         long nextNanosToWait = nanosToWaitForPermission(
-            permits, activeState.nanosPerPermission, nexPermissions);
+            permits, activeState.getConfig().getNanosPerPermit(), nexPermissions);
 
         State nextState = reservePermissions(activeState, permits, timeoutInNanos,
             nexPermissions, nextNanosToWait);
@@ -230,12 +180,12 @@ public class RefillRateLimiter implements RateLimiter {
 
     private int calculateNextPermissions(State activeState, long nanosSinceLastUpdate) {
         long accumulatedPermissions = accumulatedPermissions(activeState, nanosSinceLastUpdate);
-        return (int) min(activeState.config.getPermitCapacity(), accumulatedPermissions);
+        return (int) min(activeState.getConfig().getPermitCapacity(), accumulatedPermissions);
     }
 
     private long accumulatedPermissions(State activeState, long nanosSinceLastUpdate) {
         int currentPermissions = activeState.activePermissions;
-        long permissionsBatches = calculateBatches(activeState.nanosPerPermission, nanosSinceLastUpdate);
+        long permissionsBatches = calculateBatches(activeState.getConfig().getNanosPerPermit(), nanosSinceLastUpdate);
         return permissionsBatches + currentPermissions;
     }
 
@@ -296,7 +246,7 @@ public class RefillRateLimiter implements RateLimiter {
             permissionsWithReservation -= permits;
         }
 
-        return new State(state.config, state.nanosPerPermission, permissionsWithReservation, nanosToWait, nanoTime());
+        return new State(state.getConfig(), permissionsWithReservation, nanosToWait, nanoTime());
     }
 
 
@@ -309,7 +259,7 @@ public class RefillRateLimiter implements RateLimiter {
      * @return true if caller was able to wait for nanosToWait without {@link Thread#interrupt} and
      * not exceed timeout
      */
-    private boolean waitForPermissionIfNecessary(final long timeoutInNanos,
+    protected boolean waitForPermissionIfNecessary(final long timeoutInNanos,
                                                  final long nanosToWait) {
         boolean canAcquireImmediately = nanosToWait <= 0;
         boolean canAcquireInTime = timeoutInNanos >= nanosToWait;
@@ -334,7 +284,7 @@ public class RefillRateLimiter implements RateLimiter {
      * @return true if caller was not {@link Thread#interrupted} while waiting
      */
     private boolean waitForPermission(final long nanosToWait) {
-        waitingThreads.incrementAndGet();
+        waitingThreads().incrementAndGet();
         long deadline = currentNanoTime() + nanosToWait;
         boolean wasInterrupted = false;
         while (currentNanoTime() < deadline && !wasInterrupted) {
@@ -342,7 +292,7 @@ public class RefillRateLimiter implements RateLimiter {
             parkNanos(sleepBlockDuration);
             wasInterrupted = Thread.interrupted();
         }
-        waitingThreads.decrementAndGet();
+        waitingThreads().decrementAndGet();
         if (wasInterrupted) {
             currentThread().interrupt();
         }
@@ -353,25 +303,10 @@ public class RefillRateLimiter implements RateLimiter {
      * {@inheritDoc}
      */
     @Override
-    public String getName() {
-        return name;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    @Override
     public RefillRateLimiterConfig getRateLimiterConfig() {
-        return state.get().config;
+        return state().get().getConfig();
     }
 
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public Map<String, String> getTags() {
-        return tags;
-    }
 
     /**
      * {@inheritDoc}
@@ -381,18 +316,7 @@ public class RefillRateLimiter implements RateLimiter {
         return new RefillRateLimiterMetrics();
     }
 
-    @Override
-    public EventPublisher getEventPublisher() {
-        return eventProcessor;
-    }
 
-    @Override
-    public String toString() {
-        return "AtomicRateLimiter{" +
-            "name='" + name + '\'' +
-            ", rateLimiterConfig=" + state.get().config +
-            '}';
-    }
 
     /**
      * Get the enhanced Metrics with some implementation specific details.
@@ -403,16 +327,6 @@ public class RefillRateLimiter implements RateLimiter {
         return new RefillRateLimiterMetrics();
     }
 
-    private void publishRateLimiterEvent(boolean permissionAcquired, int permits) {
-        if (!eventProcessor.hasConsumers()) {
-            return;
-        }
-        if (permissionAcquired) {
-            eventProcessor.consumeEvent(new RateLimiterOnSuccessEvent(name, permits));
-            return;
-        }
-        eventProcessor.consumeEvent(new RateLimiterOnFailureEvent(name, permits));
-    }
 
     /**
      * <p>{@link RefillRateLimiter.State} represents immutable state of {@link RefillRateLimiter}
@@ -428,22 +342,22 @@ public class RefillRateLimiter implements RateLimiter {
      * <li>updatedAt - the last time the state was updated.</li>
      * </ul>
      */
-    private static class State {
-
-        private final RefillRateLimiterConfig config;
+    static class State extends BaseState<RefillRateLimiterConfig> {
 
         private final int activePermissions;
-        private final long nanosToWait;
         private final long updatedAt;
-        private final long nanosPerPermission;
 
-        public State(RefillRateLimiterConfig config, long nanosPerPermission, int activePermissions, long nanosToWait, long updatedAt) {
-            this.config = config;
-            this.nanosPerPermission = nanosPerPermission;
+        public State(RefillRateLimiterConfig config, int activePermissions, long nanosToWait, long updatedAt) {
+            super(config, activePermissions, nanosToWait);
             this.activePermissions = activePermissions;
-            this.nanosToWait = nanosToWait;
             this.updatedAt = updatedAt;
         }
+
+        @Override
+        State withConfig(RefillRateLimiterConfig config) {
+            return new State(config, activePermissions, getNanosToWait(), updatedAt);
+        }
+
     }
 
 
@@ -460,7 +374,7 @@ public class RefillRateLimiter implements RateLimiter {
          */
         @Override
         public int getNumberOfWaitingThreads() {
-            return waitingThreads.get();
+            return waitingThreads().get();
         }
 
         /**
@@ -468,7 +382,7 @@ public class RefillRateLimiter implements RateLimiter {
          */
         @Override
         public int getAvailablePermissions() {
-            State currentState = state.get();
+            State currentState = state().get();
             State estimatedState = calculateNextState(1, -1, currentState);
             return estimatedState.activePermissions;
         }
@@ -477,9 +391,9 @@ public class RefillRateLimiter implements RateLimiter {
          * @return estimated time duration in nanos to wait for the next permission
          */
         public long getNanosToWait() {
-            State currentState = state.get();
+            State currentState = state().get();
             State estimatedState = calculateNextState(1, -1, currentState);
-            return estimatedState.nanosToWait;
+            return estimatedState.getNanosToWait();
         }
 
     }
